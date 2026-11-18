@@ -3,8 +3,8 @@ from sqlalchemy import select,func,text
 from src.config.database import get_db
 from src.controllers.auth import current,writable,admin,login
 from src.controllers.export import export_review
-from src.schemas.business import Login,BatchInput,InspectionInput,ReviewInput,ApprovalInput
-from src.models.entities import Batch,Inspection,Review,Audit
+from src.schemas.business import Login,BatchInput,InspectionInput,ReviewInput,ApprovalInput,PairingInput
+from src.models.entities import Batch,Inspection,Review,Pairing,Audit
 from src.services import business
 from src.utils.serialize import record
 router=APIRouter()
@@ -31,7 +31,14 @@ def get_review(id:int,db=Depends(get_db),u=Depends(current)):return record(busin
 def approve(id:int,data:ApprovalInput,db=Depends(get_db),u=Depends(admin)):return business.approve(db,id,data.note,u)
 @router.get('/reviews/{id}/export')
 def export(id:int,db=Depends(get_db),u=Depends(current)):return export_review(business.review(db,id))
+@router.get('/pairings')
+def get_pairings(db=Depends(get_db),u=Depends(current)):
+    return [{k:v for k,v in record(x).items() if k not in ('snapshot','result')} for x in db.scalars(select(Pairing).order_by(Pairing.id.desc()))]
+@router.post('/pairings',status_code=202)
+def create_pairing(data:PairingInput,db=Depends(get_db),u=Depends(writable)):return business.submit_pairing(db,data.model_dump(),u)
+@router.get('/pairings/{id}')
+def get_pairing(id:int,db=Depends(get_db),u=Depends(current)):return record(business.pairing(db,id))
 @router.get('/audits')
 def audits(db=Depends(get_db),u=Depends(admin)):return [record(x) for x in db.scalars(select(Audit).order_by(Audit.id.desc()).limit(100))]
 @router.get('/counts')
-def counts(db=Depends(get_db),u=Depends(current)):return {m.__tablename__:db.scalar(select(func.count()).select_from(m)) for m in (Batch,Inspection,Review)}
+def counts(db=Depends(get_db),u=Depends(current)):return {m.__tablename__:db.scalar(select(func.count()).select_from(m)) for m in (Batch,Inspection,Review,Pairing)}

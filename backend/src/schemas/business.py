@@ -1,5 +1,9 @@
 from pydantic import BaseModel,Field,field_validator
-from typing import Literal
+from typing import Literal,Optional
+from datetime import datetime,timezone
+def _utc(v):
+    # 页面按 UTC 录入的朴素时间一律视为 UTC
+    return v.replace(tzinfo=timezone.utc) if v is not None and v.tzinfo is None else v
 class Login(BaseModel):
     email:str
     password:str
@@ -21,6 +25,19 @@ class InspectionInput(BaseModel):
     flour_yield:float=Field(gt=0,le=100,allow_inf_nan=False)
     moisture:float=Field(ge=0,le=30,allow_inf_nan=False)
     inspector:str=Field(min_length=1,max_length=50)
+    sampled_at:Optional[datetime]=None
+    @field_validator('sampled_at')
+    @classmethod
+    def utc_sampled(cls,v):return _utc(v)
+class PairingInput(BaseModel):
+    title:str=Field(min_length=2,max_length=120)
+    line:Literal["一线","二线","三线"]
+    adjusted_at:datetime
+    window_hours:int=Field(gt=0,le=720)
+    moisture_tolerance:float=Field(ge=0,le=30,allow_inf_nan=False)
+    @field_validator('adjusted_at')
+    @classmethod
+    def utc_adjusted(cls,v):return _utc(v)
 class ReviewInput(BaseModel):
     title:str=Field(min_length=2,max_length=120)
     line:Literal["全部","一线","二线","三线"]="全部"

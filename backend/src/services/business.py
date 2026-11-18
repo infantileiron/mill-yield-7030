@@ -1,9 +1,10 @@
-from sqlalchemy import select,func
+from sqlalchemy import select,func,or_
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 from redis import Redis
+from datetime import datetime,timezone
 from src.config.settings import REDIS_URL
-from src.models.entities import Batch,Inspection,Review
+from src.models.entities import Batch,Inspection,Review,Pairing
 from src.utils.serialize import record
 queue=Redis.from_url(REDIS_URL,decode_responses=True)
 def batches(db):
@@ -40,3 +41,20 @@ def approve(db,id,note,user):
     if obj.status!='completed':raise HTTPException(409,'只有已计算且未签核的复核单可以签核')
     obj.status='approved';obj.note=note;obj.approved_by=user.email;db.commit()
     return record(obj)
+def line_snapshot(db,line,accepted_at):
+    # 受理时刻已提交的检验才进入快照；旧记录 created_at 为 NULL 视为早已提交
+    q=(select(Inspection,Batch.code,Batch.line).join(Batch,Batch.id==Inspection.batch_id)
+       .where(Batch.line==line).where(or_(Inspection.created_at.is_(None),Inspection.created_at<=accepted_at)).order_by(Inspection.id))
+    return [{**record(i),'batch_code':code,'line':ln} for i,code,ln in db.execute(q)]
+def submit_pairing(db,data,user):
+    accepted_at=datetime.now(timezone.utc)
+    rows=line_snapshot(db,data['line'],accepted_at)
+    obj=Pairing(**data,created_by=user.email,accepted_at=accepted_at,snapshot=rows);db.add(obj);db.commit()
+    try:queue.rpush('mill:pairjobs',obj.id)
+    except Exception:
+        obj.status='failed';obj.note='队列不可用，请恢复后重新提交';db.commit();raise HTTPException(503,obj.note)
+    return record(obj)
+def pairing(db,id):
+    obj=db.get(Pairing,id)
+    if not obj:raise HTTPException(404,'配对分析不存在')
+    return obj

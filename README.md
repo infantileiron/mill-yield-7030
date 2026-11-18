@@ -7,8 +7,9 @@
 青禾质量组原来把供应商批次写进 `原粮到货-1115.xlsx`，检验员录入不同工作簿，分析员手算四分位数，负责人在群里确认。问题是样本与批次容易错位、计算口径随人员变化、签核意见无法回到当时的数据。本项目承接原粮入厂检验，输出带冻结样本和 SHA-256 的复核 CSV，供产线负责人安排复测。
 
 - 批次台账：供应商、产线、吨数、日期、样本数，唯一业务编号。
-- 检验录入：出粉率、水分、检验员，范围校验和重复编号阻断。
+- 检验录入：出粉率、水分、实际采样时间、检验员，范围校验和重复编号阻断。
 - 分布诊断：按产线冻结快照，Redis 排队由独立 Python worker 计算，显示完整样本直方图、分位数、IQR 异常点和分组均值。
+- 调参配对：选一条产线、调参时刻和前后等长时段，同批次且水分差不超限的样本一一配对，先求最多对数，再给出所有最多对方案中配对平均增幅的上下界及两端明细。
 - 复核报告：负责人签核意见，分析员与观察员可下载含原始样本的 CSV。
 - JWT 三角色、写操作审计、每分钟请求限流、可恢复的错误提示。
 
@@ -52,7 +53,7 @@ docker compose down -v --remove-orphans
 
 ## 数据与计算口径
 
-固定随机种子 `3101` 生成 40 批原粮、每批 15 条检验，共 600 条样本。首批是 `QH-1115-A`，检验员林洁。`seed_demo` 按批次和样本自然键检查后插入；重复执行不增加行数，也不覆盖已有用户数据。启动 `SEED_DEMO=true` 自动 seed，失败记录日志不阻塞进程。
+固定随机种子 `3101` 生成 40 批原粮、每批 15 条检验，共 600 条样本（均无采样时间，演示“旧样本时间未知”）。首批是 `QH-1115-A`，检验员林洁。另有种子 `3102` 生成 4 个 `QH-ADJ-*` 演示批次：一线在 2026-11-12 08:00 UTC 调参，前后各 48 小时窗口内分布着带采样时间的样本，覆盖正常配对、对侧样本不足、水分差超限与窗口外排除四种情形，并预置一份已完成的「磨辊调参前后配对（演示）」。`seed_demo` 按批次和样本自然键检查后插入；重复执行不增加行数，也不覆盖已有用户数据。启动 `SEED_DEMO=true` 自动 seed，失败记录日志不阻塞进程。
 
 出粉率范围 `(0,100]`，水分 `[0,30]`，NaN 与 Infinity 被拒绝。数据均为模拟数值，没有外部生产数据依赖。复核按提交时快照计算，后续录入不会改变既有报告。
 
@@ -63,7 +64,15 @@ docker compose down -v --remove-orphans
 - 分组按原粮产线计算 n、均值、最小、最大。异常点不从总体统计中移除。
 - 结果带样本快照 SHA-256，同一冻结输入可复现。统计异常只是核对线索，不自动判废。
 
-后台 worker 从 Redis 消费复核 id，更新 queued→running→completed/failed，写结果至共享 artifacts 卷。重启时会扫描未完成任务并重新排队。负责人仅能签核 completed 状态，签核后不可重复签核。CSV 导出包含状态、口径值、签核意见和所有冻结样本。
+调参前后配对分析（`pairings` 表，`/pairings` 接口，页面「调参配对」）：
+
+- 录入检验时填写实际采样时间 `sampled_at`；旧样本该字段为 NULL 表示时间未知，不参与配对分组。迟到记录按采样时刻入组，不按录入时刻。
+- 发起时选择一条产线、调参时刻 T 与前后等长时段 ±N 小时：前时段 `[T−N, T)`，后时段 `[T, T+N)`，恰好落在 T 的样本计入调参后。
+- 受理时刻冻结该产线已提交（`created_at ≤ 受理时刻`）的检验快照；补录与受理并发时以受理时已提交的检验为准，计算中补录照常写入，既有结果不变。
+- 配对约束：同一批次且水分差不超过设定值，每份样本最多参与一对。先在二分图上求最大配对数（最小费用最大流，成本为增幅的百分点整数倍），再在所有达到最大配对数的方案中取配对平均增幅最小（下界）与最大（上界）的方案，页面展示两端配对明细。
+- 未参与样本带原因：同批次对侧时段无样本、同批次对侧样本水分差超限、或同批次可配对样本已用于其他配对；未参与指在下界与上界两种方案中都未进入配对。采样时间未知或不在时段内的样本列入范围外清单并说明原因。配对数为零时上下界为空，页面说明无法配对。
+
+后台 worker 从 Redis 消费复核 id 与配对 id，更新 queued→running→completed/failed，写结果至共享 artifacts 卷。重启时会扫描未完成任务并重新排队。负责人仅能签核 completed 状态，签核后不可重复签核。CSV 导出包含状态、口径值、签核意见和所有冻结样本。
 
 ## 一天的工作剧本
 
@@ -78,7 +87,7 @@ docker compose down -v --remove-orphans
 
 ## 目录与本地开发
 
-`backend/src` 按 routes/controllers/services/models/schemas/middlewares/utils/constants/config 分职责；`backend/scripts` 是幂等 seed；`backend/migrations` 记录初始 schema 约定，实际表结构由 SQLAlchemy `create_all` 应用。`frontend/src` 按 api/stores/types/components/common/hooks/pages/router/utils/constants 分模块。
+`backend/src` 按 routes/controllers/services/models/schemas/middlewares/utils/constants/config 分职责；`backend/scripts` 是幂等 seed；`backend/migrations` 记录初始 schema 约定，实际表结构由 SQLAlchemy `create_all` 应用，`ensure_schema` 在启动时为既有库幂等补齐 `inspections.sampled_at / created_at` 两列（002）。`frontend/src` 按 api/stores/types/components/common/hooks/pages/router/utils/constants 分模块。
 
 本地 Python 开发：安装 `backend/requirements.txt`，配置 `DATABASE_URL` / `REDIS_URL` / `JWT_SECRET`，在 backend 目录执行 `uvicorn src.main:app --reload` 与 `python -m src.worker`。静态前端通过 Nginx `/api/` 代理后端无前缀路由，不需要 Node 构建。
 
